@@ -42,7 +42,6 @@ def analyze_hand():
 
         unique_id = str(uuid.uuid4())
         temp_filename = f"temp_{unique_id}.jpg"
-        predict_name = f"predict_{unique_id}"
 
         try:
             # Save image
@@ -60,7 +59,7 @@ def analyze_hand():
             # Process YOLO results directly
             tile_vector = process_yolo_results(results[0])
 
-            # Call Gemini with detected tiles
+            # Call Gemini with detected tiles (text only, not image)
             prompt = f"Given this Mahjong hand (Singapore mahjong rules): {', '.join(tile_vector)}, suggest the best tile to discard and explain why."
             gemini_response = call_gemini_api(prompt)
 
@@ -82,6 +81,39 @@ def analyze_hand():
     except Exception as e:
         print(f"Unexpected error: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+def calculate_distance(box1, box2):
+    """Calculate distance between two bounding box centers"""
+    x1, y1 = box1[0], box1[1]  # Center coordinates
+    x2, y2 = box2[0], box2[1]  # Center coordinates
+    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+def calculate_iou(box1, box2):
+    """Calculate Intersection over Union (IoU) of two bounding boxes"""
+    # Convert from center format (x, y, w, h) to corner format (x1, y1, x2, y2)
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    box1_corners = [x1 - w1/2, y1 - h1/2, x1 + w1/2, y1 + h1/2]
+    box2_corners = [x2 - w2/2, y2 - h2/2, x2 + w2/2, y2 + h2/2]
+    
+    # Calculate intersection
+    x_left = max(box1_corners[0], box2_corners[0])
+    y_top = max(box1_corners[1], box2_corners[1])
+    x_right = min(box1_corners[2], box2_corners[2])
+    y_bottom = min(box1_corners[3], box2_corners[3])
+    
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+    
+    intersection = (x_right - x_left) * (y_bottom - y_top)
+    
+    # Calculate union
+    area1 = w1 * h1
+    area2 = w2 * h2
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0
 
 def process_yolo_results(result, target_tile_count=14):
     """Process YOLO results directly from the model output"""
@@ -143,37 +175,6 @@ def process_yolo_results(result, target_tile_count=14):
     
     print(f"Final tile count: {len(final_tiles)}")
     return final_tiles
-    """Calculate distance between two bounding box centers"""
-    x1, y1 = (box1[0] + box1[2]) / 2, (box1[1] + box1[3]) / 2
-    x2, y2 = (box2[0] + box2[2]) / 2, (box2[1] + box2[3]) / 2
-    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-def calculate_iou(box1, box2):
-    """Calculate Intersection over Union (IoU) of two bounding boxes"""
-    # Convert from center format (x, y, w, h) to corner format (x1, y1, x2, y2)
-    x1, y1, w1, h1 = box1
-    x2, y2, w2, h2 = box2
-    
-    box1_corners = [x1 - w1/2, y1 - h1/2, x1 + w1/2, y1 + h1/2]
-    box2_corners = [x2 - w2/2, y2 - h2/2, x2 + w2/2, y2 + h2/2]
-    
-    # Calculate intersection
-    x_left = max(box1_corners[0], box2_corners[0])
-    y_top = max(box1_corners[1], box2_corners[1])
-    x_right = min(box1_corners[2], box2_corners[2])
-    y_bottom = min(box1_corners[3], box2_corners[3])
-    
-    if x_right < x_left or y_bottom < y_top:
-        return 0.0
-    
-    intersection = (x_right - x_left) * (y_bottom - y_top)
-    
-    # Calculate union
-    area1 = w1 * h1
-    area2 = w2 * h2
-    union = area1 + area2 - intersection
-    
-    return intersection / union if union > 0 else 0
 
 def parse_yolo_txt_with_deduplication(filepath, confidence_threshold=0.4, iou_threshold=0.3, distance_threshold=0.05, target_tile_count=14):
     """Parse YOLO output with deduplication based on IoU and distance, optimized for 14-tile mahjong hands"""
@@ -321,6 +322,7 @@ def parse_yolo_txt(filepath):
     return tiles if tiles else []
 
 def call_gemini_api(prompt):
+    """Call Gemini API with text prompt only (no image)"""
     try:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
