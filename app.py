@@ -1,14 +1,29 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from ultralytics import YOLO
 import os
 import requests
 import uuid
-import base64
-from PIL import Image
-import io
+import math
 
 app = Flask(__name__)
 CORS(app)
+
+# Load YOLO model once on startup (for better performance)
+model = YOLO('yolo_weights/best.pt').to('cpu')
+
+# List of your classes in YOLO order
+tile_classes = [
+    'animal-cat', 'animal-centipede', 'animal-mouse', 'animal-rooster',
+    'bamboo-1', 'bamboo-2', 'bamboo-3', 'bamboo-4', 'bamboo-5', 'bamboo-6',
+    'bamboo-7', 'bamboo-8', 'bamboo-9',
+    'bonus-autumn', 'bonus-bamboo', 'bonus-chrysanthemum', 'bonus-orchid',
+    'bonus-plum', 'bonus-spring', 'bonus-summer', 'bonus-winter',
+    'characters-1', 'characters-2', 'characters-3', 'characters-4', 'characters-5',
+    'characters-6', 'characters-7', 'characters-8', 'characters-9',
+    'dots-1', 'dots-2', 'dots-3', 'dots-4', 'dots-5', 'dots-6', 'dots-7', 'dots-8', 'dots-9',
+    'honors-east', 'honors-green', 'honors-north', 'honors-red', 'honors-south', 'honors-west', 'honors-white'
+]
 
 @app.route('/')
 def home():
@@ -25,106 +40,236 @@ def analyze_hand():
         if image.filename == '':
             return jsonify({"error": "No image file selected"}), 400
 
+        unique_id = str(uuid.uuid4())
+        temp_filename = f"temp_{unique_id}.jpg"
+        predict_name = f"predict_{unique_id}"
+
         try:
-            # Read and process the image
-            image_data = image.read()
-            
-            # Optional: Resize image if too large (Gemini has size limits)
-            pil_image = Image.open(io.BytesIO(image_data))
-            
-            # Resize if image is too large (max 20MB for Gemini)
-            max_size = (1024, 1024)  # Adjust as needed
-            if pil_image.size[0] > max_size[0] or pil_image.size[1] > max_size[1]:
-                pil_image.thumbnail(max_size, Image.Resampling.LANCZOS)
-                
-                # Convert back to bytes
-                buffer = io.BytesIO()
-                pil_image.save(buffer, format='JPEG', quality=85)
-                image_data = buffer.getvalue()
+            # Save image
+            image.save(temp_filename)
+            print(f"Image saved to {temp_filename}")
 
-            # Convert to base64 for Gemini API
-            base64_image = base64.b64encode(image_data).decode('utf-8')
-            
-            # Call Gemini Vision API
-            prompt = "Study the rules of chinese mahjong. Here is a picture of my 14 mahjong tiles, now I have to discard one tile. Tell me what tile i should discard to maximise my chances of winning and briefly explain why."
+            # Run YOLO detection with confidence threshold
+            print("Running YOLO...")
+            results = model(temp_filename, save=False, save_txt=True, save_conf=True,
+                            project='yolo_output', name=predict_name, 
+                            conf=0.4,      # Lower initial confidence for 14-tile constraint
+                            iou=0.45,      # NMS IoU threshold  
+                            max_det=20)    # Allow more detections initially, filter later
+            print("YOLO done.")
 
-            gemini_response = call_gemini_vision_api(prompt, base64_image)
+            # Parse label output with deduplication
+            label_path = os.path.join('yolo_output', predict_name, 'labels', f'temp_{unique_id}.txt')
+            tile_vector = parse_yolo_txt_with_deduplication(label_path)
+
+            if not tile_vector or tile_vector == ["No tiles detected"]:
+                return jsonify({
+                    "tiles": [],
+                    "suggestion": "No mahjong tiles were detected in the image. Please ensure the image is clear and contains visible mahjong tiles."
+                })
+
+            # Call Gemini
+            prompt = f"Given this Mahjong hand (Singapore mahjong rules): {', '.join(tile_vector)}, suggest the best tile to discard and explain why."
+            gemini_response = call_gemini_api(prompt)
 
             return jsonify({
-                "tiles": [],  # Empty array for compatibility - Gemini identifies tiles in text
+                "tiles": tile_vector,
                 "suggestion": gemini_response,
-                "status": "success",
-                "analysis_method": "gemini_vision"
+                "status": "success"
             })
 
         except Exception as e:
-            print(f"Image processing error: {e}")
+            print(f"YOLO or image processing error: {e}")
             return jsonify({"error": f"Image processing failed: {str(e)}"}), 500
+
+        finally:
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+                print(f"Temp file {temp_filename} cleaned up.")
 
     except Exception as e:
         print(f"Unexpected error: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-def call_gemini_vision_api(prompt, base64_image):
+def calculate_distance(box1, box2):
+    """Calculate distance between two bounding box centers"""
+    x1, y1 = (box1[0] + box1[2]) / 2, (box1[1] + box1[3]) / 2
+    x2, y2 = (box2[0] + box2[2]) / 2, (box2[1] + box2[3]) / 2
+    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+def calculate_iou(box1, box2):
+    """Calculate Intersection over Union (IoU) of two bounding boxes"""
+    # Convert from center format (x, y, w, h) to corner format (x1, y1, x2, y2)
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    box1_corners = [x1 - w1/2, y1 - h1/2, x1 + w1/2, y1 + h1/2]
+    box2_corners = [x2 - w2/2, y2 - h2/2, x2 + w2/2, y2 + h2/2]
+    
+    # Calculate intersection
+    x_left = max(box1_corners[0], box2_corners[0])
+    y_top = max(box1_corners[1], box2_corners[1])
+    x_right = min(box1_corners[2], box2_corners[2])
+    y_bottom = min(box1_corners[3], box2_corners[3])
+    
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+    
+    intersection = (x_right - x_left) * (y_bottom - y_top)
+    
+    # Calculate union
+    area1 = w1 * h1
+    area2 = w2 * h2
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0
+
+def parse_yolo_txt_with_deduplication(filepath, confidence_threshold=0.4, iou_threshold=0.3, distance_threshold=0.05, target_tile_count=14):
+    """Parse YOLO output with deduplication based on IoU and distance, optimized for 14-tile mahjong hands"""
+    detections = []
+    
     try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return "Error: GEMINI_API_KEY environment variable not set."
+        if not os.path.exists(filepath):
+            print(f"Label file not found: {filepath}")
+            return ["No tiles detected"]
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+
+        if not lines:
+            print("Label file is empty")
+            return ["No tiles detected"]
+
+        # Parse all detections first
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) >= 6:  # class_id, x, y, w, h, confidence
+                try:
+                    class_id = int(parts[0])
+                    x, y, w, h = map(float, parts[1:5])
+                    confidence = float(parts[5])
+                    
+                    # Filter by confidence
+                    if confidence >= confidence_threshold and 0 <= class_id < len(tile_classes):
+                        detections.append({
+                            'class_id': class_id,
+                            'tile_name': tile_classes[class_id],
+                            'bbox': [x, y, w, h],
+                            'confidence': confidence,
+                            'used': False
+                        })
+                        print(f"Detected: {tile_classes[class_id]} (conf: {confidence:.3f})")
+                
+                except (ValueError, IndexError) as e:
+                    print(f"Parsing error for line '{line.strip()}': {e}")
+
+        # Sort by confidence (highest first)
+        detections.sort(key=lambda x: x['confidence'], reverse=True)
         
-        json_data = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": base64_image
-                        }
-                    }
-                ]
-            }],
-            "generationConfig": {
-                "temperature": 0.7,
-                "topK": 40,
-                "topP": 0.95,
-                "maxOutputTokens": 2048,
-            }
-        }
+        # If we have way too many detections, be more strict with confidence
+        if len(detections) > target_tile_count * 2:
+            adjusted_threshold = min(0.7, max(confidence_threshold, 
+                                           sorted([d['confidence'] for d in detections], reverse=True)[target_tile_count]))
+            detections = [d for d in detections if d['confidence'] >= adjusted_threshold]
+            print(f"Too many detections, adjusted confidence threshold to {adjusted_threshold:.3f}")
+        
+        # Sort by horizontal position (left to right) for better spatial understanding
+        detections.sort(key=lambda x: x['bbox'][0])  # Sort by x-coordinate
+        
+        # Deduplicate using Non-Maximum Suppression approach
+        final_tiles = []
+        
+        for detection in detections:
+            if detection['used']:
+                continue
+                
+            # Check if this detection overlaps significantly with any already selected detection
+            is_duplicate = False
+            
+            for other in detections:
+                if other['used'] and other != detection:
+                    # Same class and high IoU = likely duplicate
+                    if (detection['class_id'] == other['class_id'] and 
+                        calculate_iou(detection['bbox'], other['bbox']) > iou_threshold):
+                        is_duplicate = True
+                        print(f"Filtering duplicate {detection['tile_name']} due to IoU overlap")
+                        break
+                    
+                    # Different class but very close proximity = possible misclassification
+                    elif calculate_distance(detection['bbox'], other['bbox']) < distance_threshold:
+                        is_duplicate = True
+                        print(f"Filtering {detection['tile_name']} due to proximity to {other['tile_name']}")
+                        break
+            
+            if not is_duplicate:
+                final_tiles.append(detection['tile_name'])
+                detection['used'] = True
+                print(f"Accepted: {detection['tile_name']}")
+        
+        # Validate tile count and provide feedback
+        if len(final_tiles) != target_tile_count:
+            print(f"Warning: Detected {len(final_tiles)} tiles, expected {target_tile_count}")
+            
+            # If we have too few tiles, try lowering confidence threshold
+            if len(final_tiles) < target_tile_count and confidence_threshold > 0.3:
+                print("Trying with lower confidence threshold...")
+                return parse_yolo_txt_with_deduplication(filepath, 
+                                                       confidence_threshold=0.3, 
+                                                       iou_threshold=iou_threshold, 
+                                                       distance_threshold=distance_threshold,
+                                                       target_tile_count=target_tile_count)
+            
+            # If we still have too many, be more aggressive with deduplication
+            elif len(final_tiles) > target_tile_count:
+                print("Still too many tiles, applying stricter deduplication...")
+                return parse_yolo_txt_with_deduplication(filepath, 
+                                                       confidence_threshold=confidence_threshold + 0.1, 
+                                                       iou_threshold=0.2, 
+                                                       distance_threshold=0.03,
+                                                       target_tile_count=target_tile_count)
 
-        response = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            json=json_data,
-            timeout=30
-        )
-
-        print(f"Gemini Vision response code: {response.status_code}")
-        if response.status_code != 200:
-            print(f"Gemini API error response: {response.text}")
-            return f"Gemini API error: {response.status_code} - {response.text}"
-
-        response_data = response.json()
-        if 'candidates' in response_data and response_data['candidates']:
-            candidate = response_data['candidates'][0]
-            if 'content' in candidate and 'parts' in candidate['content']:
-                parts = candidate['content']['parts']
-                return parts[0]['text'] if parts else "No response from Gemini."
-            else:
-                print(f"Unexpected response structure: {response_data}")
-                return "Gemini API returned unexpected format."
-
-        return "No candidates in Gemini response."
-
-    except requests.exceptions.Timeout:
-        return "Gemini API request timed out."
     except Exception as e:
-        print(f"Gemini Vision exception: {e}")
-        return f"Gemini Vision API error: {str(e)}"
+        print(f"Error parsing label file: {e}")
+        return ["No tiles detected"]
 
-# Keep the original text-based Gemini function as backup
-def call_gemini_text_api(prompt):
+    return final_tiles if final_tiles else ["No tiles detected"]
+
+def parse_yolo_txt(filepath):
+    """Original parsing function - kept as backup"""
+    tiles = []
+    try:
+        if not os.path.exists(filepath):
+            print(f"Label file not found: {filepath}")
+            return ["No tiles detected"]
+
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+
+        if not lines:
+            print("Label file is empty")
+            return ["No tiles detected"]
+
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) >= 1:
+                try:
+                    class_id = int(parts[0])
+                    if 0 <= class_id < len(tile_classes):
+                        tile_name = tile_classes[class_id]
+                        tiles.append(tile_name)
+                        print(f"Detected tile: {tile_name}")
+                    else:
+                        print(f"Invalid class_id: {class_id}")
+                except ValueError as e:
+                    print(f"Parsing error: {e}")
+
+    except Exception as e:
+        print(f"Error parsing label file: {e}")
+        return ["No tiles detected"]
+
+    return tiles if tiles else ["No tiles detected"]
+
+def call_gemini_api(prompt):
     try:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -148,7 +293,7 @@ def call_gemini_text_api(prompt):
             timeout=30
         )
 
-        print(f"Gemini text response code: {response.status_code}")
+        print(f"Gemini response code: {response.status_code}")
         if response.status_code != 200:
             return f"Gemini API error: {response.status_code} - {response.text}"
 
@@ -162,10 +307,11 @@ def call_gemini_text_api(prompt):
     except requests.exceptions.Timeout:
         return "Gemini API request timed out."
     except Exception as e:
-        print(f"Gemini text exception: {e}")
-        return f"Gemini text API error: {str(e)}"
+        print(f"Gemini exception: {e}")
+        return f"Gemini API error: {str(e)}"
 
 if __name__ == '__main__':
-    print("MahjongLah backend with Gemini Vision running...")
+    os.makedirs('yolo_output', exist_ok=True)
+    print("MahjongLah backend running...")
     port = int(os.environ.get("PORT", 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
