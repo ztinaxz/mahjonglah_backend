@@ -51,16 +51,14 @@ def analyze_hand():
 
             # Run YOLO detection with confidence threshold
             print("Running YOLO...")
-            results = model(temp_filename, save=False, save_txt=True, save_conf=True,
-                            project='yolo_output', name=predict_name, 
+            results = model(temp_filename, 
                             conf=0.4,      # Lower initial confidence for 14-tile constraint
                             iou=0.45,      # NMS IoU threshold  
                             max_det=20)    # Allow more detections initially, filter later
             print("YOLO done.")
 
-            # Parse label output with deduplication
-            label_path = os.path.join('yolo_output', predict_name, 'labels', f'temp_{unique_id}.txt')
-            tile_vector = parse_yolo_txt_with_deduplication(label_path)
+            # Process YOLO results directly
+            tile_vector = process_yolo_results(results[0])
 
             # Call Gemini with detected tiles
             prompt = f"Given this Mahjong hand (Singapore mahjong rules): {', '.join(tile_vector)}, suggest the best tile to discard and explain why."
@@ -85,7 +83,66 @@ def analyze_hand():
         print(f"Unexpected error: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-def calculate_distance(box1, box2):
+def process_yolo_results(result, target_tile_count=14):
+    """Process YOLO results directly from the model output"""
+    detections = []
+    
+    # Extract boxes, confidences, and class IDs from YOLO result
+    if result.boxes is not None:
+        boxes = result.boxes.xywh.cpu().numpy()  # Get boxes in xywh format
+        confidences = result.boxes.conf.cpu().numpy()
+        class_ids = result.boxes.cls.cpu().numpy().astype(int)
+        
+        for i, (box, conf, class_id) in enumerate(zip(boxes, confidences, class_ids)):
+            if 0 <= class_id < len(tile_classes):
+                detections.append({
+                    'class_id': class_id,
+                    'tile_name': tile_classes[class_id],
+                    'bbox': box,  # [x_center, y_center, width, height]
+                    'confidence': conf,
+                    'used': False
+                })
+                print(f"Detected: {tile_classes[class_id]} (conf: {conf:.3f})")
+    
+    if not detections:
+        print("No tiles detected by YOLO")
+        return []
+    
+    # Sort by confidence (highest first)
+    detections.sort(key=lambda x: x['confidence'], reverse=True)
+    
+    # Apply deduplication using same logic as before
+    final_tiles = []
+    
+    for detection in detections:
+        if detection['used']:
+            continue
+            
+        # Check if this detection overlaps significantly with any already selected detection
+        is_duplicate = False
+        
+        for other in detections:
+            if other['used'] and other != detection:
+                # Same class and high IoU = likely duplicate
+                if (detection['class_id'] == other['class_id'] and 
+                    calculate_iou(detection['bbox'], other['bbox']) > 0.3):
+                    is_duplicate = True
+                    print(f"Filtering duplicate {detection['tile_name']} due to IoU overlap")
+                    break
+                
+                # Different class but very close proximity = possible misclassification
+                elif calculate_distance(detection['bbox'], other['bbox']) < 0.05:
+                    is_duplicate = True
+                    print(f"Filtering {detection['tile_name']} due to proximity to {other['tile_name']}")
+                    break
+        
+        if not is_duplicate:
+            final_tiles.append(detection['tile_name'])
+            detection['used'] = True
+            print(f"Accepted: {detection['tile_name']}")
+    
+    print(f"Final tile count: {len(final_tiles)}")
+    return final_tiles
     """Calculate distance between two bounding box centers"""
     x1, y1 = (box1[0] + box1[2]) / 2, (box1[1] + box1[3]) / 2
     x2, y2 = (box2[0] + box2[2]) / 2, (box2[1] + box2[3]) / 2
