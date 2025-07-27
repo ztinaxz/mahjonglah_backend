@@ -46,16 +46,12 @@ def analyze_hand():
             base64_image = base64.b64encode(image_data).decode('utf-8')
             
             # Call Gemini Vision API
-            prompt = """Analyze this image of Mahjong tiles and provide:
-1. List all the tiles you can see in the image (use standard mahjong notation like "1-bamboo", "2-dots", "east-wind", "red-dragon", etc.)
-2. Based on Singapore Mahjong rules, suggest which tile to discard and explain your reasoning
-3. If you cannot clearly identify the tiles, please say so
-
-Please be specific about what tiles you see and provide strategic advice."""
+            prompt = "Study the rules of chinese mahjong. Here is a picture of my 14 mahjong tiles, now I have to discard one tile. Tell me what tile i should discard to maximise my chances of winning and briefly explain why."
 
             gemini_response = call_gemini_vision_api(prompt, base64_image)
 
             return jsonify({
+                "tiles": [],  # Empty array for compatibility - Gemini identifies tiles in text
                 "suggestion": gemini_response,
                 "status": "success",
                 "analysis_method": "gemini_vision"
