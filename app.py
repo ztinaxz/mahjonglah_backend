@@ -62,13 +62,7 @@ def analyze_hand():
             label_path = os.path.join('yolo_output', predict_name, 'labels', f'temp_{unique_id}.txt')
             tile_vector = parse_yolo_txt_with_deduplication(label_path)
 
-            if not tile_vector or tile_vector == ["No tiles detected"]:
-                return jsonify({
-                    "tiles": [],
-                    "suggestion": "No mahjong tiles were detected in the image. Please ensure the image is clear and contains visible mahjong tiles."
-                })
-
-            # Call Gemini
+            # Call Gemini with detected tiles
             prompt = f"Given this Mahjong hand (Singapore mahjong rules): {', '.join(tile_vector)}, suggest the best tile to discard and explain why."
             gemini_response = call_gemini_api(prompt)
 
@@ -131,14 +125,14 @@ def parse_yolo_txt_with_deduplication(filepath, confidence_threshold=0.4, iou_th
     try:
         if not os.path.exists(filepath):
             print(f"Label file not found: {filepath}")
-            return ["No tiles detected"]
+            return []
 
         with open(filepath, 'r') as f:
             lines = f.readlines()
 
         if not lines:
             print("Label file is empty")
-            return ["No tiles detected"]
+            return []
 
         # Parse all detections first
         for line in lines:
@@ -230,9 +224,9 @@ def parse_yolo_txt_with_deduplication(filepath, confidence_threshold=0.4, iou_th
 
     except Exception as e:
         print(f"Error parsing label file: {e}")
-        return ["No tiles detected"]
+        return []
 
-    return final_tiles if final_tiles else ["No tiles detected"]
+    return final_tiles if final_tiles else []
 
 def parse_yolo_txt(filepath):
     """Original parsing function - kept as backup"""
@@ -240,14 +234,14 @@ def parse_yolo_txt(filepath):
     try:
         if not os.path.exists(filepath):
             print(f"Label file not found: {filepath}")
-            return ["No tiles detected"]
+            return []
 
         with open(filepath, 'r') as f:
             lines = f.readlines()
 
         if not lines:
             print("Label file is empty")
-            return ["No tiles detected"]
+            return []
 
         for line in lines:
             parts = line.strip().split()
@@ -265,9 +259,9 @@ def parse_yolo_txt(filepath):
 
     except Exception as e:
         print(f"Error parsing label file: {e}")
-        return ["No tiles detected"]
+        return []
 
-    return tiles if tiles else ["No tiles detected"]
+    return tiles if tiles else []
 
 def call_gemini_api(prompt):
     try:
