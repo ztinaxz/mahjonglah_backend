@@ -4,13 +4,12 @@ from ultralytics import YOLO
 import os
 import requests
 import uuid
-import torch
 
 app = Flask(__name__)
 CORS(app)
 
 # Load YOLO model once on startup (for better performance)
-model = YOLO('yolo_weights/best.pt') 
+model = YOLO('yolo_weights/best.pt').to('cpu')
 
 # List of your classes in YOLO order
 tile_classes = [
