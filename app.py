@@ -9,7 +9,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Load YOLO model once on startup (for better performance)
-model = torch.load('your_model.pt', weights_only=False)
+model = torch.load('best.pt', weights_only=False)
 
 # List of your classes in YOLO order
 tile_classes = [
