@@ -2,9 +2,9 @@
 
 Flask==2.3.3
 flask-cors==4.0.0
-ultralytics==8.0.196
-torch==2.5.1+cpu
-torchvision==0.16.1+cpu
+ultralytics==8.1.15
+torch==2.7.1+cpu
+torchvision==0.22.1+cpu
 opencv-python-headless==4.8.1.78
 Pillow==10.0.1
 requests==2.31.0
