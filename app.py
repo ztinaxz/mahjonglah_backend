@@ -4,12 +4,30 @@ from ultralytics import YOLO
 import os
 import requests
 import uuid
+import torch
 
 app = Flask(__name__)
 CORS(app)
 
+# Fix for PyTorch 2.6 security changes
+# Allow Ultralytics classes to be loaded safely
+torch.serialization.add_safe_globals([
+    'ultralytics.nn.tasks.DetectionModel',
+    'ultralytics.nn.modules.block.C2f',
+    'ultralytics.nn.modules.block.SPPF',
+    'ultralytics.nn.modules.conv.Conv',
+    'ultralytics.nn.modules.head.Detect',
+    'ultralytics.models.yolo.detect.DetectionModel'
+])
+
 # Load YOLO model once on startup (for better performance)
-model = YOLO('yolo_weights/best.pt').to('cpu')
+try:
+    model = YOLO('yolo_weights/best.pt').to('cpu')
+    print("YOLO model loaded successfully")
+except Exception as e:
+    print(f"Error loading YOLO model: {e}")
+    # Fallback - you might want to handle this differently
+    model = None
 
 # List of your classes in YOLO order
 tile_classes = [
@@ -32,6 +50,11 @@ def home():
 def analyze_hand():
     try:
         print("Request received.")
+        
+        # Check if model loaded successfully
+        if model is None:
+            return jsonify({"error": "YOLO model failed to load"}), 500
+            
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
 
