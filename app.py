@@ -8,23 +8,8 @@ import uuid
 app = Flask(__name__)
 CORS(app)
 
-# Model path
-MODEL_PATH = 'yolo_weights/best.pt'
-
 # Load YOLO model once on startup (for better performance)
-if not os.path.exists(MODEL_PATH):
-    print(f"⚠️ Model file not found at {MODEL_PATH}. YOLO may not work correctly.")
-else:
-    print(f"✅ Loading YOLO model from {MODEL_PATH}...")
-
-model = YOLO(MODEL_PATH).to('cpu')
-
-# Print class names (helpful for debugging whether model is loaded correctly)
-try:
-    print("✅ YOLO model loaded successfully.")
-    print("📋 Model class names:", model.names)
-except Exception as e:
-    print("❌ Error inspecting YOLO model:", e)
+model = YOLO('yolo_weights/best.pt').to('cpu')
 
 # List of your classes in YOLO order
 tile_classes = [
@@ -43,21 +28,10 @@ tile_classes = [
 def home():
     return jsonify({"status": "ok", "message": "Mahjong backend is running! POST an image to /analyze."})
 
-@app.route('/test-yolo')
-def test_yolo():
-    test_image = "test.jpg"
-    if not os.path.exists(test_image):
-        return jsonify({"error": "Test image not found. Please upload test.jpg to the root directory."})
-
-    print("🧪 Running YOLO on test image...")
-    results = model(test_image)
-    print("📦 YOLO output:", results)
-    return jsonify({"message": "YOLO ran successfully", "results": results[0].names if results else "No results"})
-
 @app.route('/analyze', methods=['POST'])
 def analyze_hand():
     try:
-        print("📥 Request received.")
+        print("Request received.")
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
 
@@ -70,14 +44,17 @@ def analyze_hand():
         predict_name = f"predict_{unique_id}"
 
         try:
+            # Save image
             image.save(temp_filename)
-            print(f"📸 Image saved as {temp_filename}")
+            print(f"Image saved to {temp_filename}")
 
-            print("🤖 Running YOLO inference...")
+            # Run YOLO detection
+            print("Running YOLO...")
             results = model(temp_filename, save=False, save_txt=True, save_conf=True,
                             project='yolo_output', name=predict_name)
-            print("✅ YOLO done.")
+            print("YOLO done.")
 
+            # Parse label output
             label_path = os.path.join('yolo_output', predict_name, 'labels', f'temp_{unique_id}.txt')
             tile_vector = parse_yolo_txt(label_path)
 
@@ -87,6 +64,7 @@ def analyze_hand():
                     "suggestion": "No mahjong tiles were detected in the image. Please ensure the image is clear and contains visible mahjong tiles."
                 })
 
+            # Call Gemini
             prompt = f"Given this Mahjong hand (Singapore mahjong rules): {', '.join(tile_vector)}, suggest the best tile to discard and explain why."
             gemini_response = call_gemini_api(prompt)
 
@@ -97,30 +75,30 @@ def analyze_hand():
             })
 
         except Exception as e:
-            print(f"❌ YOLO or image processing error: {e}")
+            print(f"YOLO or image processing error: {e}")
             return jsonify({"error": f"Image processing failed: {str(e)}"}), 500
 
         finally:
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
-                print(f"🧹 Temp file {temp_filename} removed.")
+                print(f"Temp file {temp_filename} cleaned up.")
 
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 def parse_yolo_txt(filepath):
     tiles = []
     try:
         if not os.path.exists(filepath):
-            print(f"⚠️ Label file not found: {filepath}")
+            print(f"Label file not found: {filepath}")
             return ["No tiles detected"]
 
         with open(filepath, 'r') as f:
             lines = f.readlines()
 
         if not lines:
-            print("⚠️ Label file is empty")
+            print("Label file is empty")
             return ["No tiles detected"]
 
         for line in lines:
@@ -131,14 +109,14 @@ def parse_yolo_txt(filepath):
                     if 0 <= class_id < len(tile_classes):
                         tile_name = tile_classes[class_id]
                         tiles.append(tile_name)
-                        print(f"🀄 Detected tile: {tile_name}")
+                        print(f"Detected tile: {tile_name}")
                     else:
-                        print(f"❌ Invalid class_id: {class_id}")
+                        print(f"Invalid class_id: {class_id}")
                 except ValueError as e:
-                    print(f"❌ Parsing error: {e}")
+                    print(f"Parsing error: {e}")
 
     except Exception as e:
-        print(f"❌ Error parsing label file: {e}")
+        print(f"Error parsing label file: {e}")
         return ["No tiles detected"]
 
     return tiles if tiles else ["No tiles detected"]
@@ -167,7 +145,7 @@ def call_gemini_api(prompt):
             timeout=30
         )
 
-        print(f"📨 Gemini response code: {response.status_code}")
+        print(f"Gemini response code: {response.status_code}")
         if response.status_code != 200:
             return f"Gemini API error: {response.status_code} - {response.text}"
 
@@ -181,11 +159,11 @@ def call_gemini_api(prompt):
     except requests.exceptions.Timeout:
         return "Gemini API request timed out."
     except Exception as e:
-        print(f"❌ Gemini exception: {e}")
+        print(f"Gemini exception: {e}")
         return f"Gemini API error: {str(e)}"
 
 if __name__ == '__main__':
     os.makedirs('yolo_output', exist_ok=True)
-    print("🚀 MahjongLah backend running...")
+    print("MahjongLah backend running...")
     port = int(os.environ.get("PORT", 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
