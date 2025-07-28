@@ -1,46 +1,12 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from ultralytics import YOLO
 import os
 import requests
+import base64
 import uuid
-import torch
 
 app = Flask(__name__)
 CORS(app)
-
-# Fix for PyTorch 2.6 security changes
-# Allow Ultralytics classes to be loaded safely
-torch.serialization.add_safe_globals([
-    'ultralytics.nn.tasks.DetectionModel',
-    'ultralytics.nn.modules.block.C2f',
-    'ultralytics.nn.modules.block.SPPF',
-    'ultralytics.nn.modules.conv.Conv',
-    'ultralytics.nn.modules.head.Detect',
-    'ultralytics.models.yolo.detect.DetectionModel'
-])
-
-# Load YOLO model once on startup (for better performance)
-try:
-    model = YOLO('yolo_weights/best.pt').to('cpu')
-    print("YOLO model loaded successfully")
-except Exception as e:
-    print(f"Error loading YOLO model: {e}")
-    # Fallback - you might want to handle this differently
-    model = None
-
-# List of your classes in YOLO order
-tile_classes = [
-    'animal-cat', 'animal-centipede', 'animal-mouse', 'animal-rooster',
-    'bamboo-1', 'bamboo-2', 'bamboo-3', 'bamboo-4', 'bamboo-5', 'bamboo-6',
-    'bamboo-7', 'bamboo-8', 'bamboo-9',
-    'bonus-autumn', 'bonus-bamboo', 'bonus-chrysanthemum', 'bonus-orchid',
-    'bonus-plum', 'bonus-spring', 'bonus-summer', 'bonus-winter',
-    'characters-1', 'characters-2', 'characters-3', 'characters-4', 'characters-5',
-    'characters-6', 'characters-7', 'characters-8', 'characters-9',
-    'dots-1', 'dots-2', 'dots-3', 'dots-4', 'dots-5', 'dots-6', 'dots-7', 'dots-8', 'dots-9',
-    'honors-east', 'honors-green', 'honors-north', 'honors-red', 'honors-south', 'honors-west', 'honors-white'
-]
 
 @app.route('/')
 def home():
@@ -51,10 +17,6 @@ def analyze_hand():
     try:
         print("Request received.")
         
-        # Check if model loaded successfully
-        if model is None:
-            return jsonify({"error": "YOLO model failed to load"}), 500
-            
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
 
@@ -62,97 +24,69 @@ def analyze_hand():
         if image.filename == '':
             return jsonify({"error": "No image file selected"}), 400
 
-        unique_id = str(uuid.uuid4())
-        temp_filename = f"temp_{unique_id}.jpg"
-        predict_name = f"predict_{unique_id}"
-
         try:
-            # Save image
-            image.save(temp_filename)
-            print(f"Image saved to {temp_filename}")
+            # Read image data
+            image_data = image.read()
+            
+            # Convert to base64
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            # Get image format
+            image_format = image.content_type
+            if not image_format:
+                # Try to determine from filename
+                filename_lower = image.filename.lower()
+                if filename_lower.endswith('.jpg') or filename_lower.endswith('.jpeg'):
+                    image_format = 'image/jpeg'
+                elif filename_lower.endswith('.png'):
+                    image_format = 'image/png'
+                elif filename_lower.endswith('.webp'):
+                    image_format = 'image/webp'
+                else:
+                    image_format = 'image/jpeg'  # default
+            
+            print(f"Image format: {image_format}")
+            print("Sending image to Gemini...")
 
-            # Run YOLO detection
-            print("Running YOLO...")
-            results = model(temp_filename, save=False, save_txt=True, save_conf=True,
-                            project='yolo_output', name=predict_name)
-            print("YOLO done.")
-
-            # Parse label output
-            label_path = os.path.join('yolo_output', predict_name, 'labels', f'temp_{unique_id}.txt')
-            tile_vector = parse_yolo_txt(label_path)
-
-            if not tile_vector or tile_vector == ["No tiles detected"]:
-                return jsonify({
-                    "tiles": [],
-                    "suggestion": "No mahjong tiles were detected in the image. Please ensure the image is clear and contains visible mahjong tiles."
-                })
-
-            # Call Gemini
-            prompt = f"Given this Mahjong hand (Singapore mahjong rules): {', '.join(tile_vector)}, suggest the best tile to discard and explain why."
-            gemini_response = call_gemini_api(prompt)
+            # Call Gemini with image
+            prompt = "Study the Chinese mahjong rules and suggest one tile to discard with a short explanation"
+            gemini_response = call_gemini_with_image(prompt, image_base64, image_format)
 
             return jsonify({
-                "tiles": tile_vector,
                 "suggestion": gemini_response,
                 "status": "success"
             })
 
         except Exception as e:
-            print(f"YOLO or image processing error: {e}")
+            print(f"Image processing error: {e}")
             return jsonify({"error": f"Image processing failed: {str(e)}"}), 500
-
-        finally:
-            if os.path.exists(temp_filename):
-                os.remove(temp_filename)
-                print(f"Temp file {temp_filename} cleaned up.")
 
     except Exception as e:
         print(f"Unexpected error: {e}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-def parse_yolo_txt(filepath):
-    tiles = []
-    try:
-        if not os.path.exists(filepath):
-            print(f"Label file not found: {filepath}")
-            return ["No tiles detected"]
-
-        with open(filepath, 'r') as f:
-            lines = f.readlines()
-
-        if not lines:
-            print("Label file is empty")
-            return ["No tiles detected"]
-
-        for line in lines:
-            parts = line.strip().split()
-            if len(parts) >= 1:
-                try:
-                    class_id = int(parts[0])
-                    if 0 <= class_id < len(tile_classes):
-                        tile_name = tile_classes[class_id]
-                        tiles.append(tile_name)
-                        print(f"Detected tile: {tile_name}")
-                    else:
-                        print(f"Invalid class_id: {class_id}")
-                except ValueError as e:
-                    print(f"Parsing error: {e}")
-
-    except Exception as e:
-        print(f"Error parsing label file: {e}")
-        return ["No tiles detected"]
-
-    return tiles if tiles else ["No tiles detected"]
-
-def call_gemini_api(prompt):
+def call_gemini_with_image(prompt, image_base64, image_format):
     try:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             return "Error: GEMINI_API_KEY environment variable not set."
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        
         json_data = {
-            "contents": [{"parts": [{"text": prompt}]}],
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": image_format,
+                                "data": image_base64
+                            }
+                        }
+                    ]
+                }
+            ],
             "generationConfig": {
                 "temperature": 0.7,
                 "topK": 40,
@@ -170,14 +104,21 @@ def call_gemini_api(prompt):
 
         print(f"Gemini response code: {response.status_code}")
         if response.status_code != 200:
+            print(f"Gemini error response: {response.text}")
             return f"Gemini API error: {response.status_code} - {response.text}"
 
         response_data = response.json()
+        print(f"Gemini response: {response_data}")
+        
         if 'candidates' in response_data and response_data['candidates']:
-            parts = response_data['candidates'][0].get('content', {}).get('parts', [])
-            return parts[0]['text'] if parts else "No response from Gemini."
+            candidate = response_data['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                parts = candidate['content']['parts']
+                return parts[0]['text'] if parts else "No response from Gemini."
+            else:
+                return "Gemini response format issue - no content found."
 
-        return "Unexpected Gemini API format."
+        return "Unexpected Gemini API response format."
 
     except requests.exceptions.Timeout:
         return "Gemini API request timed out."
@@ -186,7 +127,6 @@ def call_gemini_api(prompt):
         return f"Gemini API error: {str(e)}"
 
 if __name__ == '__main__':
-    os.makedirs('yolo_output', exist_ok=True)
     print("MahjongLah backend running...")
     port = int(os.environ.get("PORT", 10000))
     app.run(debug=False, host='0.0.0.0', port=port)
