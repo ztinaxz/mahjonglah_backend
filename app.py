@@ -49,7 +49,7 @@ def analyze_hand():
             print("Sending image to Gemini...")
 
             # Call Gemini with image
-            prompt = "Study the Chinese mahjong rules and suggest one tile to discard with a short explanation"
+            prompt = "Study the Chinese mahjong rules and suggest one tile to discard with a short explanation. Remember that 3 of the same tiles is good, 3 cconsecutive tiles is good too, do not discard them"
             gemini_response = call_gemini_with_image(prompt, image_base64, image_format)
 
             return jsonify({
